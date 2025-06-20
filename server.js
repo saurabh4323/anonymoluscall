@@ -93,7 +93,10 @@ io.on("connection", (socket) => {
 
     const availableUsers = Array.from(waitingQueue).filter(
       (id) =>
-        id !== userId && connectedUsers.has(id) && !activeConnections.has(id)
+        id !== userId &&
+        connectedUsers.has(id) &&
+        !activeConnections.has(id) &&
+        connectedUsers.get(id).connected
     );
 
     if (availableUsers.length > 0) {
@@ -102,27 +105,34 @@ io.on("connection", (socket) => {
       const partnerSocket = connectedUsers.get(partnerId);
 
       if (partnerSocket && partnerSocket.connected) {
-        waitingQueue.delete(userId);
-        waitingQueue.delete(partnerId);
-        activeConnections.set(userId, partnerId);
-        activeConnections.set(partnerId, userId);
+        // Add delay to ensure client readiness
+        setTimeout(() => {
+          if (
+            socket.connected &&
+            partnerSocket.connected &&
+            !activeConnections.has(userId) &&
+            !activeConnections.has(partnerId)
+          ) {
+            waitingQueue.delete(userId);
+            waitingQueue.delete(partnerId);
+            activeConnections.set(userId, partnerId);
+            activeConnections.set(partnerId, userId);
 
-        console.log(`Matched ${userId} with ${partnerId}`);
+            console.log(`Matched ${userId} with ${partnerId}`);
 
-        socket.emit("match-found", { partnerId, initiator: true });
-        if (partnerSocket.connected) {
-          partnerSocket.emit("match-found", {
-            partnerId: userId,
-            initiator: false,
-          });
-        } else {
-          console.log(
-            `Partner ${partnerId} disconnected before match confirmation`
-          );
-          endConnection(userId, partnerId);
-          waitingQueue.add(userId);
-          socket.emit("waiting-for-match");
-        }
+            socket.emit("match-found", { partnerId, initiator: true });
+            partnerSocket.emit("match-found", {
+              partnerId: userId,
+              initiator: false,
+            });
+          } else {
+            console.log(
+              `Match aborted: one or both users (${userId}, ${partnerId}) not ready`
+            );
+            waitingQueue.add(userId);
+            socket.emit("waiting-for-match");
+          }
+        }, 2000); // 2-second delay
       } else {
         if (partnerId) {
           cleanupUser(partnerId);
