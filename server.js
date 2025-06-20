@@ -1,10 +1,9 @@
 import { createServer } from "http";
 import { Server } from "socket.io";
 
-const port = parseInt(process.env.PORT || "3001", 10);
+const port = parseInt(process.env.PORT || "10000", 10);
 
 const server = createServer((req, res) => {
-  // Add CORS headers for HTTP requests
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -23,11 +22,9 @@ const io = new Server(server, {
   path: "/socket.io",
   cors: {
     origin: [
-      "http://localhost:3000",
-      "https://your-domain.com",
       "https://ww-five-rust.vercel.app",
-      /^https:\/\/.*\.vercel\.app$/,
-      /^https:\/\/.*\.netlify\.app$/,
+      "https://anonymoluscall-1.onrender.com",
+      "http://localhost:3000",
     ],
     methods: ["GET", "POST"],
     credentials: true,
@@ -38,35 +35,30 @@ const io = new Server(server, {
   pingInterval: 25000,
 });
 
-// Store connected users and waiting queue
-const connectedUsers = new Map(); // userId -> socket
-const waitingQueue = new Set(); // Set of userIds waiting for match
-const activeConnections = new Map(); // userId -> partnerId
-const userLastSeen = new Map(); // userId -> timestamp
+const connectedUsers = new Map();
+const waitingQueue = new Set();
+const activeConnections = new Map();
+const userLastSeen = new Map();
 
-// Clean up inactive users periodically
 setInterval(() => {
   const now = Date.now();
-  const INACTIVE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+  const INACTIVE_THRESHOLD = 5 * 60 * 1000;
 
   for (const [userId, lastSeen] of userLastSeen.entries()) {
     if (now - lastSeen > INACTIVE_THRESHOLD) {
       console.log(`Cleaning up inactive user: ${userId}`);
-
       const socket = connectedUsers.get(userId);
-      if (socket) {
+      if (socket && socket.connected) {
         socket.disconnect(true);
       }
-
       cleanupUser(userId);
     }
   }
-}, 60000); // Check every minute
+}, 60000);
 
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
 
-  // Generate unique user ID
   const userId = generateUserId();
   socket.userId = userId;
   connectedUsers.set(userId, socket);
@@ -74,10 +66,8 @@ io.on("connection", (socket) => {
 
   console.log(`User ${userId} connected. Total users: ${connectedUsers.size}`);
 
-  // Send online count to all users
   io.emit("online-count", connectedUsers.size);
 
-  // Send welcome message with connection info
   socket.emit("connect-info", {
     userId,
     serverTime: new Date().toISOString(),
@@ -88,46 +78,52 @@ io.on("connection", (socket) => {
     console.log(`User ${userId} looking for random match`);
     userLastSeen.set(userId, Date.now());
 
-    // Remove from any existing connection first
+    if (!socket.connected) {
+      console.log(`User ${userId} disconnected before matching`);
+      cleanupUser(userId);
+      return;
+    }
+
     if (activeConnections.has(userId)) {
       const partnerId = activeConnections.get(userId);
       endConnection(userId, partnerId);
     }
 
-    // Remove from waiting queue if already there
     waitingQueue.delete(userId);
 
-    // Try to find a match from waiting queue
     const availableUsers = Array.from(waitingQueue).filter(
       (id) =>
         id !== userId && connectedUsers.has(id) && !activeConnections.has(id)
     );
 
     if (availableUsers.length > 0) {
-      // Match with random available user
       const partnerId =
         availableUsers[Math.floor(Math.random() * availableUsers.length)];
       const partnerSocket = connectedUsers.get(partnerId);
 
       if (partnerSocket && partnerSocket.connected) {
-        // Remove both from waiting queue
         waitingQueue.delete(userId);
         waitingQueue.delete(partnerId);
-
-        // Create connection
         activeConnections.set(userId, partnerId);
         activeConnections.set(partnerId, userId);
 
         console.log(`Matched ${userId} with ${partnerId}`);
 
-        // Initiate WebRTC connection (user becomes initiator)
         socket.emit("match-found", { partnerId, initiator: true });
-        partnerSocket.emit("match-found", {
-          partnerId: userId,
-          initiator: false,
-        });
+        if (partnerSocket.connected) {
+          partnerSocket.emit("match-found", {
+            partnerId: userId,
+            initiator: false,
+          });
+        } else {
+          console.log(
+            `Partner ${partnerId} disconnected before match confirmation`
+          );
+          endConnection(userId, partnerId);
+          waitingQueue.add(userId);
+          socket.emit("waiting-for-match");
+        }
       } else {
-        // Partner socket is not valid, clean up and add to queue
         if (partnerId) {
           cleanupUser(partnerId);
         }
@@ -135,7 +131,6 @@ io.on("connection", (socket) => {
         socket.emit("waiting-for-match");
       }
     } else {
-      // Add to waiting queue
       waitingQueue.add(userId);
       socket.emit("waiting-for-match");
       console.log(
@@ -151,12 +146,8 @@ io.on("connection", (socket) => {
     if (partnerId && connectedUsers.has(partnerId)) {
       const partnerSocket = connectedUsers.get(partnerId);
       if (partnerSocket && partnerSocket.connected) {
-        partnerSocket.emit("webrtc-offer", {
-          from: userId,
-          offer,
-        });
+        partnerSocket.emit("webrtc-offer", { from: userId, offer });
       } else {
-        // Partner disconnected, end connection
         endConnection(userId, partnerId);
       }
     }
@@ -169,12 +160,8 @@ io.on("connection", (socket) => {
     if (partnerId && connectedUsers.has(partnerId)) {
       const partnerSocket = connectedUsers.get(partnerId);
       if (partnerSocket && partnerSocket.connected) {
-        partnerSocket.emit("webrtc-answer", {
-          from: userId,
-          answer,
-        });
+        partnerSocket.emit("webrtc-answer", { from: userId, answer });
       } else {
-        // Partner disconnected, end connection
         endConnection(userId, partnerId);
       }
     }
@@ -187,12 +174,8 @@ io.on("connection", (socket) => {
     if (partnerId && connectedUsers.has(partnerId)) {
       const partnerSocket = connectedUsers.get(partnerId);
       if (partnerSocket && partnerSocket.connected) {
-        partnerSocket.emit("ice-candidate", {
-          from: userId,
-          candidate,
-        });
+        partnerSocket.emit("ice-candidate", { from: userId, candidate });
       } else {
-        // Partner disconnected, end connection
         endConnection(userId, partnerId);
       }
     }
@@ -216,8 +199,6 @@ io.on("connection", (socket) => {
   socket.on("disconnect", (reason) => {
     console.log(`User ${userId} disconnected: ${reason}`);
     cleanupUser(userId);
-
-    // Update online count
     io.emit("online-count", connectedUsers.size);
   });
 
@@ -225,7 +206,6 @@ io.on("connection", (socket) => {
     console.error(`Socket error for user ${userId}:`, error);
   });
 
-  // Handle socket timeout
   socket.on("connect_timeout", () => {
     console.log(`Connection timeout for user ${userId}`);
     cleanupUser(userId);
@@ -235,11 +215,9 @@ io.on("connection", (socket) => {
 function endConnection(userId, partnerId) {
   if (!userId || !partnerId) return;
 
-  // Remove from active connections
   activeConnections.delete(userId);
   activeConnections.delete(partnerId);
 
-  // Notify both users that call ended
   const userSocket = connectedUsers.get(userId);
   const partnerSocket = connectedUsers.get(partnerId);
 
@@ -257,19 +235,13 @@ function endConnection(userId, partnerId) {
 function cleanupUser(userId) {
   if (!userId) return;
 
-  // Remove from active connections
   const partnerId = activeConnections.get(userId);
   if (partnerId) {
     endConnection(userId, partnerId);
   }
 
-  // Remove from waiting queue
   waitingQueue.delete(userId);
-
-  // Remove from connected users
   connectedUsers.delete(userId);
-
-  // Remove from last seen tracking
   userLastSeen.delete(userId);
 
   console.log(`Cleaned up user ${userId}`);
@@ -279,22 +251,18 @@ function generateUserId() {
   return Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 }
 
-// Send periodic stats and health check
 setInterval(() => {
   const stats = {
     totalUsers: connectedUsers.size,
     waitingUsers: waitingQueue.size,
-    activeConnections: activeConnections.size / 2, // Divide by 2 since each connection is stored twice
+    activeConnections: activeConnections.size / 2,
     serverTime: new Date().toISOString(),
     uptime: process.uptime(),
   };
 
   console.log(`Stats: ${JSON.stringify(stats)}`);
-
-  // Send stats to all connected clients
   io.emit("server-stats", stats);
 
-  // Clean up any stale connections
   const connectedUserIds = Array.from(connectedUsers.keys());
   for (const userId of connectedUserIds) {
     const socket = connectedUsers.get(userId);
@@ -303,19 +271,16 @@ setInterval(() => {
       cleanupUser(userId);
     }
   }
-}, 30000); // Every 30 seconds
+}, 30000);
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully");
 
-  // Notify all users about server shutdown
   io.emit("server-shutdown", {
     message: "Server is shutting down. Please reconnect later.",
     timestamp: new Date().toISOString(),
   });
 
-  // Close all active connections
   for (const [userId, socket] of connectedUsers.entries()) {
     if (socket && socket.connected) {
       socket.emit("call-ended");
@@ -324,13 +289,11 @@ process.on("SIGTERM", () => {
     cleanupUser(userId);
   }
 
-  // Clear all data structures
   connectedUsers.clear();
   waitingQueue.clear();
   activeConnections.clear();
   userLastSeen.clear();
 
-  // Close socket.io server
   io.close((err) => {
     if (err) {
       console.error("Error closing socket.io server:", err);
@@ -338,7 +301,6 @@ process.on("SIGTERM", () => {
     console.log("Socket.io server closed");
   });
 
-  // Close HTTP server
   server.close((err) => {
     if (err) {
       console.error("Error closing HTTP server:", err);
@@ -348,21 +310,17 @@ process.on("SIGTERM", () => {
     process.exit(0);
   });
 
-  // Force exit if cleanup takes too long
   setTimeout(() => {
     console.error("Forceful shutdown due to timeout");
     process.exit(1);
-  }, 10000); // 10 seconds timeout
+  }, 10000);
 });
 
-// Handle uncaught exceptions
 process.on("uncaughtException", (err) => {
   console.error("Uncaught Exception:", err);
-  // Attempt graceful shutdown
   process.emit("SIGTERM");
 });
 
-// Handle unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
 });
